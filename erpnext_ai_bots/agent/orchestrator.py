@@ -9,6 +9,7 @@ from erpnext_ai_bots.guards.permissions import PermissionGuard
 from erpnext_ai_bots.tools.sanitizer import InputSanitizer
 from erpnext_ai_bots.utils.token_counter import TokenTracker
 from erpnext_ai_bots.utils.prompt_defense import check_prompt_injection
+from erpnext_ai_bots.guards.hitl import HITLGuard
 
 
 class Orchestrator:
@@ -30,6 +31,7 @@ class Orchestrator:
         self.sanitizer = InputSanitizer()
         self.token_tracker = TokenTracker(session_id=self.session_id)
         self.stream_bridge = StreamBridge(session_id=self.session_id, user=self.user)
+        self.hitl_guard = HITLGuard(user=self.user, session_id=self.session_id, company=self.company)
 
         # Conversation state
         self.messages = self._load_messages()
@@ -348,12 +350,38 @@ class Orchestrator:
                     tool_name, tool_input
                 )
 
+                # Check Human-in-the-Loop approval gate
+                tool_instance = self.tool_registry.get_tool(tool_name)
+                action_type = getattr(tool_instance, "action_type", "Read")
+                needs_hitl, act_type, summary = self.hitl_guard.requires_approval(
+                    tool_name, sanitized_input, action_type=action_type
+                )
+                if needs_hitl:
+                    pending_result = self.hitl_guard.stage_pending_action(
+                        tool_name, sanitized_input, action_type=act_type, summary=summary
+                    )
+                    exec_time = int((time.time() - start_time) * 1000)
+                    self._audit_log(
+                        tool_name=tool_name,
+                        tool_input=sanitized_input,
+                        tool_output=pending_result,
+                        status="PendingApproval",
+                        exec_time=exec_time,
+                        blocked_fields=blocked_fields,
+                    )
+                    self.stream_bridge.send_pending_action(pending_result)
+                    result_items.append({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(pending_result, default=str),
+                    })
+                    continue
+
                 # Subagent spawn
                 if tool_name == "meta.spawn_subagent":
                     result = self._handle_subagent(sanitized_input)
                 else:
-                    tool_fn = self.tool_registry.get_tool(tool_name)
-                    result = tool_fn.execute(**sanitized_input)
+                    result = tool_instance.execute(**sanitized_input)
 
                 exec_time = int((time.time() - start_time) * 1000)
 
@@ -538,12 +566,38 @@ class Orchestrator:
                     tool_name, tool_input
                 )
 
+                # Check Human-in-the-Loop approval gate
+                tool_instance = self.tool_registry.get_tool(tool_name)
+                action_type = getattr(tool_instance, "action_type", "Read")
+                needs_hitl, act_type, summary = self.hitl_guard.requires_approval(
+                    tool_name, sanitized_input, action_type=action_type
+                )
+                if needs_hitl:
+                    pending_result = self.hitl_guard.stage_pending_action(
+                        tool_name, sanitized_input, action_type=act_type, summary=summary
+                    )
+                    exec_time = int((time.time() - start_time) * 1000)
+                    self._audit_log(
+                        tool_name=tool_name,
+                        tool_input=sanitized_input,
+                        tool_output=pending_result,
+                        status="PendingApproval",
+                        exec_time=exec_time,
+                        blocked_fields=blocked_fields,
+                    )
+                    self.stream_bridge.send_pending_action(pending_result)
+                    results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "content": json.dumps(pending_result, default=str),
+                    })
+                    continue
+
                 # Subagent spawn
                 if tool_name == "meta.spawn_subagent":
                     result = self._handle_subagent(sanitized_input)
                 else:
-                    tool_fn = self.tool_registry.get_tool(tool_name)
-                    result = tool_fn.execute(**sanitized_input)
+                    result = tool_instance.execute(**sanitized_input)
 
                 exec_time = int((time.time() - start_time) * 1000)
 

@@ -1751,6 +1751,12 @@ erpnext_ai_bots.ChatWidget = class ChatWidget {
                     this._finish_streaming();
                     this._show_error(error || "Something went wrong — please try again");
                 },
+                onPendingAction: (action) => {
+                    this._render_pending_action_card(action);
+                },
+                onActionResolved: (res) => {
+                    this._update_pending_action_card(res.action_id, res.status, res.result);
+                },
             }
         );
     }
@@ -1774,6 +1780,90 @@ erpnext_ai_bots.ChatWidget = class ChatWidget {
             }
         }
         this._cleanup_stream();
+    }
+
+    _render_pending_action_card(action) {
+        const actionId = action.action_id;
+        if (!actionId || $(`#action-card-${actionId}`).length) return;
+
+        const summary = frappe.utils.escape_html(action.summary || "Action requires authorization");
+        const actionType = frappe.utils.escape_html(action.action_type || "Confirm");
+
+        const cardHtml = `
+            <div class="ai-pending-action-card" id="action-card-${actionId}" data-action-id="${actionId}">
+                <div class="ai-pending-action-header">
+                    <span class="ai-pending-action-badge">
+                        <i class="octicon octicon-shield-lock"></i> Authorization Required
+                    </span>
+                    <span class="text-muted" style="font-size:11px; text-transform:uppercase;">${actionType}</span>
+                </div>
+                <div class="ai-pending-action-body">
+                    ${summary}
+                </div>
+                <div class="ai-pending-action-footer">
+                    <button class="btn btn-xs btn-action-approve" data-id="${actionId}">
+                        <i class="octicon octicon-check"></i> Approve &amp; Execute
+                    </button>
+                    <button class="btn btn-xs btn-action-reject" data-id="${actionId}">
+                        <i class="octicon octicon-x"></i> Reject
+                    </button>
+                </div>
+            </div>
+        `;
+
+        const $card = $(cardHtml);
+        this.$messages.append($card);
+        this._scroll_bottom();
+
+        $card.find(".btn-action-approve").on("click", (e) => {
+            const btn = $(e.currentTarget);
+            btn.prop("disabled", true).html('<i class="octicon octicon-sync"></i> Executing...');
+            $card.find(".btn-action-reject").prop("disabled", true);
+
+            frappe.call({
+                method: "erpnext_ai_bots.api.chat.execute_pending_action",
+                args: { action_id: actionId },
+                callback: (r) => {
+                    if (r.message && r.message.status === "success") {
+                        this._update_pending_action_card(actionId, "Approved", r.message.result);
+                        frappe.show_alert({ message: __("Action executed successfully"), indicator: "green" });
+                    }
+                },
+                error: () => {
+                    btn.prop("disabled", false).html('<i class="octicon octicon-check"></i> Approve &amp; Execute');
+                    $card.find(".btn-action-reject").prop("disabled", false);
+                }
+            });
+        });
+
+        $card.find(".btn-action-reject").on("click", () => {
+            frappe.confirm(__("Are you sure you want to reject this action?"), () => {
+                frappe.call({
+                    method: "erpnext_ai_bots.api.chat.reject_pending_action",
+                    args: { action_id: actionId },
+                    callback: () => {
+                        this._update_pending_action_card(actionId, "Rejected");
+                        frappe.show_alert({ message: __("Action rejected"), indicator: "orange" });
+                    }
+                });
+            });
+        });
+    }
+
+    _update_pending_action_card(actionId, status, result) {
+        const $card = $(`#action-card-${actionId}`);
+        if (!$card.length) return;
+
+        const isApproved = status === "Approved";
+        const badgeColor = isApproved ? "green" : "red";
+        const icon = isApproved ? "octicon-check" : "octicon-x";
+        const label = isApproved ? "Approved &amp; Executed" : "Rejected";
+
+        $card.find(".ai-pending-action-footer").html(`
+            <span class="indicator-pill ${badgeColor}">
+                <i class="octicon ${icon}"></i> ${label}
+            </span>
+        `);
     }
 
     // ── Status indicators ─────────────────────────────────────────────

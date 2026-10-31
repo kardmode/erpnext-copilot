@@ -42,6 +42,13 @@ erpnext_ai_bots.stream.StreamHandler = class StreamHandler {
                 if (data.session_id !== this.session_id) return;
                 if (this.callbacks.onError) this.callbacks.onError(data.error);
             },
+            ai_pending_action: (data) => {
+                if (data.session_id !== this.session_id) return;
+                if (this.callbacks.onPendingAction) this.callbacks.onPendingAction(data);
+            },
+            ai_action_resolved: (data) => {
+                if (this.callbacks.onActionResolved) this.callbacks.onActionResolved(data);
+            },
         };
 
         for (const [event, handler] of Object.entries(events)) {

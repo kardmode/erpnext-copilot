@@ -302,6 +302,28 @@ def categorize_session(session_id: str, category: str):
 
 
 @frappe.whitelist()
+def execute_pending_action(action_id: str):
+    """Execute a staged pending action authorized by the user."""
+    from erpnext_ai_bots.guards.hitl import execute_action
+
+    user = frappe.session.user
+    if not user or user == "Guest":
+        frappe.throw(_("Authentication required"), frappe.PermissionError)
+    return execute_action(action_id, user)
+
+
+@frappe.whitelist()
+def reject_pending_action(action_id: str, reason: str = None):
+    """Reject a staged pending action."""
+    from erpnext_ai_bots.guards.hitl import reject_action
+
+    user = frappe.session.user
+    if not user or user == "Guest":
+        frappe.throw(_("Authentication required"), frappe.PermissionError)
+    return reject_action(action_id, user, reason)
+
+
+@frappe.whitelist()
 def confirm_action(action_type: str, doctype: str, name: str):
     """Explicit confirmation endpoint for write actions."""
     if action_type == "submit":
