@@ -52,7 +52,7 @@ class Orchestrator:
                     return c
                 elif isinstance(c, list):
                     return " ".join([b.get("text", "") for b in c if isinstance(b, dict)])
-        return """
+        return ""
 
     def _save_messages(self):
         frappe.db.set_value(
@@ -93,11 +93,189 @@ class Orchestrator:
         # 3. Route to the right provider
         if self.provider == "OpenAI (ChatGPT OAuth)":
             self._openai_loop()
+        elif self.provider in ("OpenAI", "Custom"):
+            self._openai_direct_loop()
+        elif self.provider in ("Google Gemini", "Gemini"):
+            self._gemini_loop()
         else:
             self._anthropic_loop()
 
         # 4. Persist
         self._save_messages()
+
+    # ── OpenAI Direct & Custom OpenAI-compatible path ──────────────────
+
+    def _openai_direct_loop(self):
+        """Agent loop for direct OpenAI API Key and OpenAI-compatible endpoints (Ollama, Groq, etc.)."""
+        from erpnext_ai_bots.agent.providers import OpenAICompatibleClient
+
+        api_key = ""
+        try:
+            api_key = self.settings.get_password("api_key") if hasattr(self.settings, "get_password") else self.settings.api_key
+        except Exception:
+            api_key = getattr(self.settings, "api_key", "") or ""
+
+        endpoint = getattr(self.settings, "api_endpoint", None) or "https://api.openai.com/v1"
+        if not api_key and "localhost" not in endpoint and "127.0.0.1" not in endpoint:
+            self.stream_bridge.send_error("No OpenAI API Key configured in AI Bot Settings.")
+            return
+
+        client = OpenAICompatibleClient(api_key=api_key, api_endpoint=endpoint)
+        model = self.settings.model_name or "gpt-4o"
+        system_prompt = get_system_prompt(self.user, self.company)
+        tool_schemas = self.tool_registry.get_openai_schemas(
+            category=getattr(self, "session_category", "General"),
+            message_text=self._get_latest_user_text(),
+        )
+        max_iterations = self.settings.max_tool_calls_per_turn or 15
+
+        api_messages = [{"role": "system", "content": system_prompt}]
+        for m in self.messages:
+            if m.get("role") in ("user", "assistant"):
+                c = m.get("content")
+                if isinstance(c, str):
+                    api_messages.append({"role": m["role"], "content": c})
+                elif isinstance(c, list):
+                    t = " ".join([b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"])
+                    if t:
+                        api_messages.append({"role": m["role"], "content": t})
+
+        try:
+            for _ in range(max_iterations):
+                result = client.send_streaming(
+                    messages=api_messages,
+                    model=model,
+                    tools=tool_schemas,
+                    temperature=self.settings.temperature or 0.3,
+                    max_tokens=self.settings.max_tokens_per_request or 4096,
+                    on_delta=lambda delta: self.stream_bridge._publish(
+                        "ai_chunk", {"session_id": self.session_id, "text": delta}
+                    ),
+                )
+                usage = result.get("usage", {})
+                self.token_tracker.record(
+                    input_tokens=usage.get("input_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                    model=model,
+                )
+
+                function_calls = result.get("function_calls", [])
+                response_text = result.get("text", "")
+
+                if not function_calls:
+                    self.messages.append({
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": response_text}],
+                        "timestamp": frappe.utils.now_datetime().isoformat(),
+                        "usage": usage,
+                    })
+                    self.stream_bridge.send_done()
+                    return
+
+                self.messages.append({
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": response_text}],
+                    "timestamp": frappe.utils.now_datetime().isoformat(),
+                    "usage": usage,
+                })
+
+                tool_results = self._process_openai_tool_calls(function_calls)
+                for tr in tool_results:
+                    api_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tr["call_id"],
+                        "content": tr["output"],
+                    })
+
+            self.stream_bridge.send_error("Maximum tool call limit reached.")
+        except Exception as e:
+            frappe.log_error(title="OpenAI Direct Loop Error", message=frappe.get_traceback())
+            self.stream_bridge.send_error(f"AI Provider Error: {str(e)}")
+
+    # ── Google Gemini path ──────────────────────────────────────────
+
+    def _gemini_loop(self):
+        """Agent loop for Google Gemini REST streaming API."""
+        from erpnext_ai_bots.agent.providers import GeminiClient
+
+        api_key = ""
+        try:
+            api_key = self.settings.get_password("api_key") if hasattr(self.settings, "get_password") else self.settings.api_key
+        except Exception:
+            api_key = getattr(self.settings, "api_key", "") or ""
+
+        if not api_key:
+            self.stream_bridge.send_error("No Google Gemini API Key configured in AI Bot Settings.")
+            return
+
+        client = GeminiClient(api_key=api_key)
+        model = self.settings.model_name or "gemini-2.0-flash"
+        system_prompt = get_system_prompt(self.user, self.company)
+        tool_schemas = self.tool_registry.get_all_schemas(
+            category=getattr(self, "session_category", "General"),
+            message_text=self._get_latest_user_text(),
+        )
+        max_iterations = self.settings.max_tool_calls_per_turn or 15
+
+        try:
+            for _ in range(max_iterations):
+                result = client.send_streaming(
+                    messages=self.messages,
+                    system_prompt=system_prompt,
+                    model=model,
+                    tools=tool_schemas,
+                    temperature=self.settings.temperature or 0.3,
+                    max_tokens=self.settings.max_tokens_per_request or 4096,
+                    on_delta=lambda delta: self.stream_bridge._publish(
+                        "ai_chunk", {"session_id": self.session_id, "text": delta}
+                    ),
+                )
+                usage = result.get("usage", {})
+                self.token_tracker.record(
+                    input_tokens=usage.get("input_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                    model=model,
+                )
+
+                function_calls = result.get("function_calls", [])
+                response_text = result.get("text", "")
+
+                if not function_calls:
+                    self.messages.append({
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": response_text}],
+                        "timestamp": frappe.utils.now_datetime().isoformat(),
+                        "usage": usage,
+                    })
+                    self.stream_bridge.send_done()
+                    return
+
+                self.messages.append({
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": response_text}],
+                    "timestamp": frappe.utils.now_datetime().isoformat(),
+                    "usage": usage,
+                })
+
+                tool_results = self._process_openai_tool_calls(function_calls)
+                self.messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "function_call_output",
+                            "call_id": item["call_id"],
+                            "name": function_calls[i]["name"] if i < len(function_calls) else "tool",
+                            "output": item["output"],
+                        }
+                        for i, item in enumerate(tool_results)
+                    ],
+                    "timestamp": frappe.utils.now_datetime().isoformat(),
+                })
+
+            self.stream_bridge.send_error("Maximum tool call limit reached.")
+        except Exception as e:
+            frappe.log_error(title="Gemini Loop Error", message=frappe.get_traceback())
+            self.stream_bridge.send_error(f"Google Gemini Error: {str(e)}")
 
     # ── OpenAI (ChatGPT OAuth) path ──────────────────────────────────
 

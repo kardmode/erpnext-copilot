@@ -12,6 +12,7 @@
   "ai_provider_section",
   "provider",
   "api_key",
+  "api_endpoint",
   "model_name",
   "elevenlabs_api_key",
   "elevenlabs_voice_id",
@@ -84,13 +85,20 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Provider",
-   "options": "Anthropic\nOpenAI\nOpenAI (ChatGPT OAuth)\nCustom"
+   "options": "Anthropic\nOpenAI\nOpenAI (ChatGPT OAuth)\nGoogle Gemini\nCustom"
   },
   {
    "description": "Your Anthropic/OpenAI API key (BYOK)",
    "fieldname": "api_key",
    "fieldtype": "Password",
    "label": "API Key"
+  },
+  {
+   "depends_on": "eval:in_list(['Custom', 'OpenAI'], doc.provider)",
+   "description": "Custom API base URL (e.g. https://api.openai.com/v1 or http://localhost:11434/v1 for Ollama)",
+   "fieldname": "api_endpoint",
+   "fieldtype": "Data",
+   "label": "API Endpoint"
   },
   {
    "default": "claude-sonnet-4-20250514",
