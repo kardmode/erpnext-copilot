@@ -82,6 +82,144 @@ TOOL_MAP = {
 
     # Asset tools
     "asset.manage_asset": "erpnext_ai_bots.tools.asset.asset.AssetTool",
+
+    # Banking & Reconciliation tools
+    "banking.get_unreconciled_transactions": "erpnext_ai_bots.tools.banking.unreconciled_transactions.GetUnreconciledTransactionsTool",
+    "banking.suggest_matches": "erpnext_ai_bots.tools.banking.suggest_matches.SuggestMatchesTool",
+    "banking.reconcile_voucher": "erpnext_ai_bots.tools.banking.reconcile_voucher.ReconcileVoucherTool",
+    "banking.auto_reconcile": "erpnext_ai_bots.tools.banking.auto_reconcile.AutoReconcileTool",
+}
+
+
+from typing import Dict, List, Optional, Set
+
+# Universal core tools always included regardless of conversation category
+CORE_TOOLS: Set[str] = {
+    "core.get_document",
+    "core.get_list",
+    "core.create_document",
+    "core.update_document",
+    "core.submit_document",
+    "core.run_report",
+    "core.raw_sql",
+    "core.frappe_api",
+    "core.send_email",
+    "core.send_report_email",
+    "core.analyze_image",
+    "core.read_file",
+    "meta.spawn_subagent",
+    "meta.schedule_task",
+    "meta.saved_report",
+}
+
+# Domain-specific category tool mappings
+CATEGORY_TOOL_MAP: Dict[str, Set[str]] = {
+    "Finance": {
+        "accounting.get_trial_balance",
+        "accounting.get_outstanding_invoices",
+        "accounting.get_bank_balances",
+        "accounting.get_profit_and_loss",
+        "accounting.create_journal_entry",
+        "accounting.get_account_balance",
+        "accounting.get_gross_margin",
+        "accounting.create_payment_entry",
+        "accounting.get_general_ledger",
+        "purchase.get_purchase_invoices",
+        "banking.get_unreconciled_transactions",
+        "banking.suggest_matches",
+        "banking.reconcile_voucher",
+        "banking.auto_reconcile",
+    },
+    "Banking": {
+        "accounting.get_bank_balances",
+        "accounting.create_payment_entry",
+        "accounting.create_journal_entry",
+        "banking.get_unreconciled_transactions",
+        "banking.suggest_matches",
+        "banking.reconcile_voucher",
+        "banking.auto_reconcile",
+    },
+    "Sales": {
+        "sales.get_pipeline",
+        "sales.create_quotation",
+        "sales.get_sales_orders",
+        "sales.get_customer_info",
+        "sales.get_revenue_summary",
+        "sales.create_customer",
+        "sales.get_branch_performance",
+        "sales.get_sales_dashboard",
+        "crm.manage_lead",
+        "crm.manage_opportunity",
+    },
+    "Stock": {
+        "stock.get_stock_balance",
+        "stock.create_stock_entry",
+        "stock.get_warehouse_summary",
+        "stock.get_item_info",
+        "stock.get_reorder_levels",
+        "stock.create_item",
+        "stock.get_inventory_days",
+        "stock.get_stock_turnover",
+        "purchase.create_purchase_order",
+        "purchase.get_supplier_info",
+    },
+    "HR": {
+        "hr.get_leave_balance",
+        "hr.create_leave_application",
+        "hr.get_salary_slip",
+        "hr.get_attendance_summary",
+        "hr.get_employee_info",
+    },
+    "Purchase": {
+        "purchase.create_purchase_order",
+        "purchase.get_supplier_info",
+        "purchase.get_purchase_invoices",
+        "purchase.create_supplier",
+    },
+    "Projects": {
+        "project.manage_project",
+        "project.manage_task",
+        "support.manage_issue",
+        "asset.manage_asset",
+    },
+}
+
+# Domain keywords for dynamic message text intent detection
+CATEGORY_KEYWORDS: Dict[str, List[str]] = {
+    "Finance": [
+        "invoice", "payment", "journal", "bank", "balance",
+        "p&l", "profit", "loss", "ledger", "account", "tax",
+        "receivable", "payable", "expense", "budget", "supplier",
+        "purchase", "overdue", "outstanding", "credit", "debit",
+        "revenue", "cost", "financial", "fiscal",
+    ],
+    "Sales": [
+        "quotation", "customer", "order", "pipeline", "quote",
+        "lead", "opportunity", "crm", "sale", "deal", "prospect",
+        "contract", "discount", "pricing", "client",
+    ],
+    "Stock": [
+        "stock", "item", "warehouse", "inventory", "reorder",
+        "material", "bin", "transfer", "receipt", "delivery",
+        "batch", "serial", "product", "goods",
+    ],
+    "HR": [
+        "leave", "salary", "employee", "attendance", "hr",
+        "payroll", "appraisal", "recruitment", "department",
+        "overtime", "holiday", "staff", "worker",
+    ],
+    "Purchase": [
+        "supplier", "purchase order", "po", "vendor", "procurement",
+    ],
+    "Projects": [
+        "project", "task", "milestone", "timesheet", "issue",
+        "ticket", "support", "asset",
+    ],
+    "Banking": [
+        "reconcile", "reconciliation", "bank statement", "unreconciled",
+        "clearance", "unallocated", "bank transaction", "bank feed",
+        "statement", "deposit", "withdrawal",
+    ],
 }
 
 
@@ -111,12 +249,72 @@ class ToolRegistry:
 
         return self._cache[namespaced_name]
 
-    def get_all_schemas(self) -> list:
-        """Return tool schemas for ALL registered tools (Anthropic format).
-        Skips tools that fail to import so one broken tool doesn't crash everything.
+    def resolve_active_tools(
+        self, category: Optional[str] = None, message_text: Optional[str] = None
+    ) -> List[str]:
+        """Dynamically resolve relevant tools for the current context.
+
+        1. Starts with core CRUD and communication tools.
+        2. Detects context category from parameter or message keywords.
+        3. Adds category-specific tools.
+        4. Filters out tools blocked by user role or Frappe permissions.
         """
+        active_tools = set(CORE_TOOLS)
+
+        matched_categories = set()
+        if category and category in CATEGORY_TOOL_MAP:
+            matched_categories.add(category)
+
+        if message_text:
+            msg_lower = str(message_text).lower()
+            for cat, kw_list in CATEGORY_KEYWORDS.items():
+                if any(kw in msg_lower for kw in kw_list):
+                    matched_categories.add(cat)
+
+        if matched_categories:
+            for cat in matched_categories:
+                active_tools.update(CATEGORY_TOOL_MAP.get(cat, set()))
+        else:
+            # Fallback when ambiguous or general: include all tools from TOOL_MAP
+            active_tools.update(TOOL_MAP.keys())
+
+        # Role-based filtering
+        user_roles = set()
+        try:
+            if self.user and self.user != "Administrator":
+                user_roles = set(frappe.get_roles(self.user))
+        except Exception:
+            pass
+
+        # Exclude raw_sql for non-System Manager
+        if self.user != "Administrator" and "System Manager" not in user_roles:
+            active_tools.discard("core.raw_sql")
+
+        # Exclude management-only tools for non-managers
+        management_roles = {"System Manager", "Accounts Manager", "Sales Manager", "Stock Manager"}
+        has_mgmt_role = bool(self.user == "Administrator" or user_roles.intersection(management_roles))
+        if not has_mgmt_role:
+            mgmt_only_tools = {
+                "accounting.get_gross_margin",
+                "sales.get_branch_performance",
+                "sales.get_sales_dashboard",
+                "stock.get_inventory_days",
+                "stock.get_stock_turnover",
+                "accounting.get_profit_and_loss",
+                "accounting.get_trial_balance",
+                "accounting.get_general_ledger",
+            }
+            active_tools.difference_update(mgmt_only_tools)
+
+        return sorted([t for t in active_tools if t in TOOL_MAP])
+
+    def get_all_schemas(
+        self, category: Optional[str] = None, message_text: Optional[str] = None
+    ) -> list:
+        """Return tool schemas in Anthropic format for dynamically scoped tools."""
+        tool_names = self.resolve_active_tools(category=category, message_text=message_text)
         schemas = []
-        for namespaced_name in TOOL_MAP:
+        for namespaced_name in tool_names:
             try:
                 tool = self.get_tool(namespaced_name)
                 schemas.append(tool.schema())
@@ -128,23 +326,13 @@ class ToolRegistry:
                 )
         return schemas
 
-    def get_openai_schemas(self) -> list:
-        """Return tool schemas for ALL registered tools in OpenAI Responses API format.
-
-        Anthropic format:
-            {"name": "...", "description": "...", "input_schema": {"type": "object", ...}}
-
-        OpenAI Responses API format (NOT Chat Completions):
-            {"type": "function", "name": "...", "description": "...",
-             "parameters": {"type": "object", ...}}
-
-        Note: name, description, parameters are top-level siblings of type,
-        NOT nested inside a "function" key. The Responses API uses a flat structure.
-        Also: dots in names are replaced with underscores (API restriction).
-        Skips tools that fail to import.
-        """
+    def get_openai_schemas(
+        self, category: Optional[str] = None, message_text: Optional[str] = None
+    ) -> list:
+        """Return tool schemas in OpenAI Responses API format for dynamically scoped tools."""
+        tool_names = self.resolve_active_tools(category=category, message_text=message_text)
         schemas = []
-        for namespaced_name in TOOL_MAP:
+        for namespaced_name in tool_names:
             try:
                 tool = self.get_tool(namespaced_name)
                 anthropic_schema = tool.schema()
@@ -155,7 +343,6 @@ class ToolRegistry:
                     message=str(e),
                 )
                 continue
-            # Responses API doesn't allow dots in function names
             safe_name = anthropic_schema["name"].replace(".", "_")
             openai_schema = {
                 "type": "function",

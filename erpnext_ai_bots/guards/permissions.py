@@ -75,6 +75,12 @@ TOOL_PERMISSION_MAP = {
 
     # Asset tools
     "asset.manage_asset": ("read", "Asset"),
+
+    # Banking tools
+    "banking.get_unreconciled_transactions": ("read", "Bank Transaction"),
+    "banking.suggest_matches": ("read", "Bank Transaction"),
+    "banking.reconcile_voucher": ("write", "Bank Transaction"),
+    "banking.auto_reconcile": ("write", "Bank Transaction"),
 }
 
 

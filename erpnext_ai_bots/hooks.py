@@ -25,6 +25,7 @@ app_include_css = [
 has_permission = {
     "AI Chat Session": "erpnext_ai_bots.ai_bots.doctype.ai_chat_session.ai_chat_session.has_permission",
     "AI Direct Message": "erpnext_ai_bots.ai_bots.doctype.ai_direct_message.ai_direct_message.has_permission",
+    "AI Pending Action": "erpnext_ai_bots.ai_bots.doctype.ai_pending_action.ai_pending_action.has_permission",
 }
 
 # Scheduled tasks

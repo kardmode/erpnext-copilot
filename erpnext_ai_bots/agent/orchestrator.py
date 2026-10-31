@@ -9,6 +9,7 @@ from erpnext_ai_bots.guards.permissions import PermissionGuard
 from erpnext_ai_bots.tools.sanitizer import InputSanitizer
 from erpnext_ai_bots.utils.token_counter import TokenTracker
 from erpnext_ai_bots.utils.prompt_defense import check_prompt_injection
+from erpnext_ai_bots.guards.hitl import HITLGuard
 
 
 class Orchestrator:
@@ -30,6 +31,7 @@ class Orchestrator:
         self.sanitizer = InputSanitizer()
         self.token_tracker = TokenTracker(session_id=self.session_id)
         self.stream_bridge = StreamBridge(session_id=self.session_id, user=self.user)
+        self.hitl_guard = HITLGuard(user=self.user, session_id=self.session_id, company=self.company)
 
         # Conversation state
         self.messages = self._load_messages()
@@ -37,9 +39,20 @@ class Orchestrator:
 
     def _load_messages(self) -> list:
         session = frappe.get_doc("AI Chat Session", self.session_id)
+        self.session_category = getattr(session, "category", "General") or "General"
         if session.messages_json:
             return json.loads(session.messages_json)
         return []
+
+    def _get_latest_user_text(self) -> str:
+        for m in reversed(self.messages):
+            if m.get("role") == "user":
+                c = m.get("content")
+                if isinstance(c, str):
+                    return c
+                elif isinstance(c, list):
+                    return " ".join([b.get("text", "") for b in c if isinstance(b, dict)])
+        return ""
 
     def _save_messages(self):
         frappe.db.set_value(
@@ -80,11 +93,189 @@ class Orchestrator:
         # 3. Route to the right provider
         if self.provider == "OpenAI (ChatGPT OAuth)":
             self._openai_loop()
+        elif self.provider in ("OpenAI", "Custom"):
+            self._openai_direct_loop()
+        elif self.provider in ("Google Gemini", "Gemini"):
+            self._gemini_loop()
         else:
             self._anthropic_loop()
 
         # 4. Persist
         self._save_messages()
+
+    # ── OpenAI Direct & Custom OpenAI-compatible path ──────────────────
+
+    def _openai_direct_loop(self):
+        """Agent loop for direct OpenAI API Key and OpenAI-compatible endpoints (Ollama, Groq, etc.)."""
+        from erpnext_ai_bots.agent.providers import OpenAICompatibleClient
+
+        api_key = ""
+        try:
+            api_key = self.settings.get_password("api_key") if hasattr(self.settings, "get_password") else self.settings.api_key
+        except Exception:
+            api_key = getattr(self.settings, "api_key", "") or ""
+
+        endpoint = getattr(self.settings, "api_endpoint", None) or "https://api.openai.com/v1"
+        if not api_key and "localhost" not in endpoint and "127.0.0.1" not in endpoint:
+            self.stream_bridge.send_error("No OpenAI API Key configured in AI Bot Settings.")
+            return
+
+        client = OpenAICompatibleClient(api_key=api_key, api_endpoint=endpoint)
+        model = self.settings.model_name or "gpt-4o"
+        system_prompt = get_system_prompt(self.user, self.company)
+        tool_schemas = self.tool_registry.get_openai_schemas(
+            category=getattr(self, "session_category", "General"),
+            message_text=self._get_latest_user_text(),
+        )
+        max_iterations = self.settings.max_tool_calls_per_turn or 15
+
+        api_messages = [{"role": "system", "content": system_prompt}]
+        for m in self.messages:
+            if m.get("role") in ("user", "assistant"):
+                c = m.get("content")
+                if isinstance(c, str):
+                    api_messages.append({"role": m["role"], "content": c})
+                elif isinstance(c, list):
+                    t = " ".join([b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"])
+                    if t:
+                        api_messages.append({"role": m["role"], "content": t})
+
+        try:
+            for _ in range(max_iterations):
+                result = client.send_streaming(
+                    messages=api_messages,
+                    model=model,
+                    tools=tool_schemas,
+                    temperature=self.settings.temperature or 0.3,
+                    max_tokens=self.settings.max_tokens_per_request or 4096,
+                    on_delta=lambda delta: self.stream_bridge._publish(
+                        "ai_chunk", {"session_id": self.session_id, "text": delta}
+                    ),
+                )
+                usage = result.get("usage", {})
+                self.token_tracker.record(
+                    input_tokens=usage.get("input_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                    model=model,
+                )
+
+                function_calls = result.get("function_calls", [])
+                response_text = result.get("text", "")
+
+                if not function_calls:
+                    self.messages.append({
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": response_text}],
+                        "timestamp": frappe.utils.now_datetime().isoformat(),
+                        "usage": usage,
+                    })
+                    self.stream_bridge.send_done()
+                    return
+
+                self.messages.append({
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": response_text}],
+                    "timestamp": frappe.utils.now_datetime().isoformat(),
+                    "usage": usage,
+                })
+
+                tool_results = self._process_openai_tool_calls(function_calls)
+                for tr in tool_results:
+                    api_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tr["call_id"],
+                        "content": tr["output"],
+                    })
+
+            self.stream_bridge.send_error("Maximum tool call limit reached.")
+        except Exception as e:
+            frappe.log_error(title="OpenAI Direct Loop Error", message=frappe.get_traceback())
+            self.stream_bridge.send_error(f"AI Provider Error: {str(e)}")
+
+    # ── Google Gemini path ──────────────────────────────────────────
+
+    def _gemini_loop(self):
+        """Agent loop for Google Gemini REST streaming API."""
+        from erpnext_ai_bots.agent.providers import GeminiClient
+
+        api_key = ""
+        try:
+            api_key = self.settings.get_password("api_key") if hasattr(self.settings, "get_password") else self.settings.api_key
+        except Exception:
+            api_key = getattr(self.settings, "api_key", "") or ""
+
+        if not api_key:
+            self.stream_bridge.send_error("No Google Gemini API Key configured in AI Bot Settings.")
+            return
+
+        client = GeminiClient(api_key=api_key)
+        model = self.settings.model_name or "gemini-2.0-flash"
+        system_prompt = get_system_prompt(self.user, self.company)
+        tool_schemas = self.tool_registry.get_all_schemas(
+            category=getattr(self, "session_category", "General"),
+            message_text=self._get_latest_user_text(),
+        )
+        max_iterations = self.settings.max_tool_calls_per_turn or 15
+
+        try:
+            for _ in range(max_iterations):
+                result = client.send_streaming(
+                    messages=self.messages,
+                    system_prompt=system_prompt,
+                    model=model,
+                    tools=tool_schemas,
+                    temperature=self.settings.temperature or 0.3,
+                    max_tokens=self.settings.max_tokens_per_request or 4096,
+                    on_delta=lambda delta: self.stream_bridge._publish(
+                        "ai_chunk", {"session_id": self.session_id, "text": delta}
+                    ),
+                )
+                usage = result.get("usage", {})
+                self.token_tracker.record(
+                    input_tokens=usage.get("input_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                    model=model,
+                )
+
+                function_calls = result.get("function_calls", [])
+                response_text = result.get("text", "")
+
+                if not function_calls:
+                    self.messages.append({
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": response_text}],
+                        "timestamp": frappe.utils.now_datetime().isoformat(),
+                        "usage": usage,
+                    })
+                    self.stream_bridge.send_done()
+                    return
+
+                self.messages.append({
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": response_text}],
+                    "timestamp": frappe.utils.now_datetime().isoformat(),
+                    "usage": usage,
+                })
+
+                tool_results = self._process_openai_tool_calls(function_calls)
+                self.messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "function_call_output",
+                            "call_id": item["call_id"],
+                            "name": function_calls[i]["name"] if i < len(function_calls) else "tool",
+                            "output": item["output"],
+                        }
+                        for i, item in enumerate(tool_results)
+                    ],
+                    "timestamp": frappe.utils.now_datetime().isoformat(),
+                })
+
+            self.stream_bridge.send_error("Maximum tool call limit reached.")
+        except Exception as e:
+            frappe.log_error(title="Gemini Loop Error", message=frappe.get_traceback())
+            self.stream_bridge.send_error(f"Google Gemini Error: {str(e)}")
 
     # ── OpenAI (ChatGPT OAuth) path ──────────────────────────────────
 
@@ -114,7 +305,10 @@ class Orchestrator:
         )
         # model=None lets CodexClient fall back to DEFAULT_CODEX_MODEL.
 
-        tool_schemas = self.tool_registry.get_openai_schemas()
+        tool_schemas = self.tool_registry.get_openai_schemas(
+            category=getattr(self, "session_category", "General"),
+            message_text=self._get_latest_user_text(),
+        )
         max_iterations = self.settings.max_tool_calls_per_turn or 15
 
         # The Codex Responses API keeps a flat input list across turns.
@@ -348,12 +542,38 @@ class Orchestrator:
                     tool_name, tool_input
                 )
 
+                # Check Human-in-the-Loop approval gate
+                tool_instance = self.tool_registry.get_tool(tool_name)
+                action_type = getattr(tool_instance, "action_type", "Read")
+                needs_hitl, act_type, summary = self.hitl_guard.requires_approval(
+                    tool_name, sanitized_input, action_type=action_type
+                )
+                if needs_hitl:
+                    pending_result = self.hitl_guard.stage_pending_action(
+                        tool_name, sanitized_input, action_type=act_type, summary=summary
+                    )
+                    exec_time = int((time.time() - start_time) * 1000)
+                    self._audit_log(
+                        tool_name=tool_name,
+                        tool_input=sanitized_input,
+                        tool_output=pending_result,
+                        status="PendingApproval",
+                        exec_time=exec_time,
+                        blocked_fields=blocked_fields,
+                    )
+                    self.stream_bridge.send_pending_action(pending_result)
+                    result_items.append({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(pending_result, default=str),
+                    })
+                    continue
+
                 # Subagent spawn
                 if tool_name == "meta.spawn_subagent":
                     result = self._handle_subagent(sanitized_input)
                 else:
-                    tool_fn = self.tool_registry.get_tool(tool_name)
-                    result = tool_fn.execute(**sanitized_input)
+                    result = tool_instance.execute(**sanitized_input)
 
                 exec_time = int((time.time() - start_time) * 1000)
 
@@ -437,7 +657,10 @@ class Orchestrator:
                 model=self.settings.model_name or "claude-sonnet-4-20250514",
                 max_tokens=self.settings.max_tokens_per_request or 4096,
                 system=get_system_prompt(self.user, self.company),
-                tools=self.tool_registry.get_all_schemas(),
+                tools=self.tool_registry.get_all_schemas(
+                    category=getattr(self, "session_category", "General"),
+                    message_text=self._get_latest_user_text(),
+                ),
                 messages=api_messages,
             ) as stream:
                 response = self.stream_bridge.process_stream(stream)
@@ -483,14 +706,34 @@ class Orchestrator:
             )
 
     def _prepare_messages_for_api(self) -> list:
-        """Strip custom metadata keys before sending to Anthropic."""
+        """Strip custom metadata keys, prune oversized older payloads, and manage context window atomically."""
         cleaned = []
         for msg in self.messages:
             cleaned.append({"role": msg["role"], "content": msg["content"]})
 
-        # Context window management: cap at 100 messages
-        if len(cleaned) > 100:
-            cleaned = cleaned[:2] + cleaned[-98:]
+        # Atomic Context Window Management:
+        # Instead of arbitrary slicing which severs tool_use from tool_result,
+        # find clean user turn boundaries and summarize earlier messages.
+        max_turns = 24
+        if len(cleaned) > max_turns:
+            cut_idx = len(cleaned) - max_turns
+            while cut_idx < len(cleaned) and (
+                cleaned[cut_idx].get("role") != "user"
+                or (isinstance(cleaned[cut_idx].get("content"), list) and any(b.get("type") == "tool_result" for b in cleaned[cut_idx].get("content") if isinstance(b, dict)))
+            ):
+                cut_idx += 1
+
+            if cut_idx < len(cleaned):
+                cleaned = [
+                    {
+                        "role": "user",
+                        "content": "[Context note: Earlier conversation history compressed to stay within context limits]",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Acknowledged. Continuing with recent context."}],
+                    },
+                ] + cleaned[cut_idx:]
 
         return cleaned
 
@@ -538,12 +781,38 @@ class Orchestrator:
                     tool_name, tool_input
                 )
 
+                # Check Human-in-the-Loop approval gate
+                tool_instance = self.tool_registry.get_tool(tool_name)
+                action_type = getattr(tool_instance, "action_type", "Read")
+                needs_hitl, act_type, summary = self.hitl_guard.requires_approval(
+                    tool_name, sanitized_input, action_type=action_type
+                )
+                if needs_hitl:
+                    pending_result = self.hitl_guard.stage_pending_action(
+                        tool_name, sanitized_input, action_type=act_type, summary=summary
+                    )
+                    exec_time = int((time.time() - start_time) * 1000)
+                    self._audit_log(
+                        tool_name=tool_name,
+                        tool_input=sanitized_input,
+                        tool_output=pending_result,
+                        status="PendingApproval",
+                        exec_time=exec_time,
+                        blocked_fields=blocked_fields,
+                    )
+                    self.stream_bridge.send_pending_action(pending_result)
+                    results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "content": json.dumps(pending_result, default=str),
+                    })
+                    continue
+
                 # Subagent spawn
                 if tool_name == "meta.spawn_subagent":
                     result = self._handle_subagent(sanitized_input)
                 else:
-                    tool_fn = self.tool_registry.get_tool(tool_name)
-                    result = tool_fn.execute(**sanitized_input)
+                    result = tool_instance.execute(**sanitized_input)
 
                 exec_time = int((time.time() - start_time) * 1000)
 

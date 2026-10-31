@@ -69,6 +69,17 @@ class StreamBridge:
             "result": self._safe_summary(result),
         })
 
+    def send_pending_action(self, action_data: dict):
+        self._publish("ai_pending_action", {
+            "session_id": self.session_id,
+            "action_id": action_data.get("action_id"),
+            "action_name": action_data.get("action_name"),
+            "action_type": action_data.get("action_type"),
+            "summary": action_data.get("summary"),
+            "tool": action_data.get("tool_name"),
+            "input": self._safe_summary(action_data.get("tool_input", {})),
+        })
+
     def _friendly_tool_name(self, tool_name: str, tool_input: dict) -> str:
         """Convert technical tool names to user-friendly descriptions."""
         doctype = tool_input.get("doctype", "")
@@ -124,6 +135,10 @@ class StreamBridge:
             "project.manage_task": "Managing task",
             "support.manage_issue": "Managing support issue",
             "asset.manage_asset": "Looking up asset info",
+            "banking.get_unreconciled_transactions": "Fetching unreconciled bank transactions",
+            "banking.suggest_matches": "Finding matching vouchers for bank transaction",
+            "banking.reconcile_voucher": "Reconciling bank transaction with vouchers",
+            "banking.auto_reconcile": "Running batch auto-reconciliation",
         }
         return friendly.get(tool_name, f"Looking up {tool_name.split('.')[-1].replace('_', ' ')}")
 

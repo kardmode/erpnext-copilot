@@ -1,32 +1,102 @@
 import re
+from typing import Any, Dict, List
 
 import frappe
 from erpnext_ai_bots.tools.base import BaseTool
 
-# Disallowed statement keywords — any of these at the start of the query are blocked.
-_FORBIDDEN_PATTERN = re.compile(
-    r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|REPLACE|RENAME"
+# Forbidden statement keywords anywhere in the statement outside of string literals
+_FORBIDDEN_MUTATION_KEYWORDS = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|REPLACE|RENAME"
     r"|GRANT|REVOKE|LOCK|UNLOCK|CALL|EXEC|EXECUTE)\b",
     re.IGNORECASE,
 )
 
+# Forbidden administrative/internal schemas
+_FORBIDDEN_SCHEMAS = re.compile(
+    r"\b(information_schema|performance_schema|mysql|sys)\b",
+    re.IGNORECASE,
+)
+
+# Forbidden sensitive system and credential tables
+_FORBIDDEN_TABLES = re.compile(
+    r"[`'\"]?\b(__auth|tabuser|tabsingles|tabsessions|taboauth[_\s\w]*|"
+    r"tabai[_\s\w]*token|tabsocial[_\s\w]*key|tabconnected[_\s\w]*app|"
+    r"tabintegration[_\s\w]*request|tabaccess[_\s\w]*log|tabactivity[_\s\w]*log)\b[`'\"]?",
+    re.IGNORECASE,
+)
+
+# Potentially malicious or side-channel functions
+_FORBIDDEN_FUNCTIONS = re.compile(
+    r"\b(SLEEP|BENCHMARK|LOAD_FILE)\s*\(|"
+    r"\b(INTO\s+OUTFILE|INTO\s+DUMPFILE)\b",
+    re.IGNORECASE,
+)
+
+# Column names containing sensitive credentials that must be redacted from query results
+_SENSITIVE_FIELD_NAMES = {
+    "password", "api_secret", "api_key", "secret", "auth_token",
+    "token", "access_token", "refresh_token", "reset_password_key",
+    "verification_code", "private_key", "db_password", "oauth_token",
+    "elevenlabs_api_key", "session_id", "sid", "authorization",
+}
+
 
 def _validate_select_only(query: str) -> None:
-    """Raise ValueError if the query is not a plain SELECT statement."""
+    """Raise ValueError if the query violates read-only or security policies."""
     stripped = query.strip()
+
+    # 1. Block multi-statement queries (separated by semicolons)
+    if stripped.endswith(";"):
+        stripped = stripped[:-1].strip()
+
+    if ";" in stripped:
+        raise ValueError("Multi-statement queries (separated by ';') are strictly forbidden.")
+
+    # 2. Must start with SELECT
     if not re.match(r"^\s*SELECT\b", stripped, re.IGNORECASE):
         raise ValueError(
             "Only SELECT queries are allowed. "
             f"Your query starts with: {stripped[:40]!r}"
         )
-    if _FORBIDDEN_PATTERN.search(stripped):
+
+    # 3. Block data-modifying SQL keywords
+    if _FORBIDDEN_MUTATION_KEYWORDS.search(stripped):
         raise ValueError(
             "Query contains a forbidden keyword (INSERT/UPDATE/DELETE/DROP/etc.). "
             "Only read-only SELECT statements are permitted."
         )
-    # Block sub-statements that could mutate data inside a SELECT context
-    if re.search(r"\b(INTO\s+OUTFILE|INTO\s+DUMPFILE)\b", stripped, re.IGNORECASE):
-        raise ValueError("SELECT ... INTO OUTFILE/DUMPFILE is not permitted.")
+
+    # 4. Block system/schema queries
+    if _FORBIDDEN_SCHEMAS.search(stripped):
+        raise ValueError(
+            "Access to system schemas (information_schema, performance_schema, mysql, sys) is prohibited."
+        )
+
+    # 5. Block sensitive credential and authentication tables
+    if _FORBIDDEN_TABLES.search(stripped):
+        raise ValueError(
+            "Access to sensitive authentication, user, or session tables is strictly prohibited in raw SQL."
+        )
+
+    # 6. Block malicious side-channel and file I/O functions
+    if _FORBIDDEN_FUNCTIONS.search(stripped):
+        raise ValueError("Use of SLEEP, BENCHMARK, LOAD_FILE, or INTO OUTFILE is prohibited.")
+
+
+def _mask_sensitive_columns(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Mask any sensitive credential or auth keys returned in query rows."""
+    if not rows:
+        return rows
+
+    for row in rows:
+        for key in list(row.keys()):
+            key_lower = key.lower()
+            if (
+                key_lower in _SENSITIVE_FIELD_NAMES
+                or any(key_lower.endswith(sfx) for sfx in ("_password", "_secret", "_token", "_key"))
+            ):
+                row[key] = "********"
+    return rows
 
 
 def _execute_with_custom_db(query: str, limit: int) -> list:
@@ -98,6 +168,18 @@ class RawSQLTool(BaseTool):
     def execute(self, query: str, limit: int = 100, **kwargs) -> dict:
         limit = min(int(limit), 100)
 
+        # Defense-in-depth: Enforce System Manager role requirement
+        if self.user and self.user != "Administrator":
+            try:
+                roles = set(frappe.get_roles(self.user))
+                if "System Manager" not in roles:
+                    return {
+                        "error": "Permission denied: core.raw_sql requires System Manager role.",
+                        "rows": [],
+                    }
+            except Exception:
+                pass
+
         try:
             _validate_select_only(query)
         except ValueError as exc:
@@ -126,4 +208,5 @@ class RawSQLTool(BaseTool):
                 "rows": [],
             }
 
-        return {"rows": rows, "count": len(rows)}
+        sanitized_rows = _mask_sensitive_columns(rows)
+        return {"rows": sanitized_rows, "count": len(sanitized_rows)}
