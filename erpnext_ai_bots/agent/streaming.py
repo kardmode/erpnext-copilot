@@ -135,6 +135,10 @@ class StreamBridge:
             "project.manage_task": "Managing task",
             "support.manage_issue": "Managing support issue",
             "asset.manage_asset": "Looking up asset info",
+            "banking.get_unreconciled_transactions": "Fetching unreconciled bank transactions",
+            "banking.suggest_matches": "Finding matching vouchers for bank transaction",
+            "banking.reconcile_voucher": "Reconciling bank transaction with vouchers",
+            "banking.auto_reconcile": "Running batch auto-reconciliation",
         }
         return friendly.get(tool_name, f"Looking up {tool_name.split('.')[-1].replace('_', ' ')}")
 

@@ -19,6 +19,8 @@ class HITLGuard:
         "core.submit_document",
         "accounting.create_journal_entry",
         "accounting.create_payment_entry",
+        "banking.reconcile_voucher",
+        "banking.auto_reconcile",
     }
 
     # Action types that inherently mutate financial or legal records
@@ -97,6 +99,15 @@ class HITLGuard:
         if tool_name == "stock.create_stock_entry":
             purpose = tool_input.get("purpose", "Stock Entry")
             return f"Create Stock Entry ({purpose})"
+
+        if tool_name == "banking.reconcile_voucher":
+            bt_name = tool_input.get("bank_transaction", "")
+            vouchers = tool_input.get("vouchers", [])
+            return f"Reconcile Bank Transaction '{bt_name}' with {len(vouchers)} voucher(s)"
+
+        if tool_name == "banking.auto_reconcile":
+            ba = tool_input.get("bank_account", "")
+            return f"Run batch auto-reconciliation for '{ba}'"
 
         return f"{action_type} via {tool_name}"
 

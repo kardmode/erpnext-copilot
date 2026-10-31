@@ -82,6 +82,12 @@ TOOL_MAP = {
 
     # Asset tools
     "asset.manage_asset": "erpnext_ai_bots.tools.asset.asset.AssetTool",
+
+    # Banking & Reconciliation tools
+    "banking.get_unreconciled_transactions": "erpnext_ai_bots.tools.banking.unreconciled_transactions.GetUnreconciledTransactionsTool",
+    "banking.suggest_matches": "erpnext_ai_bots.tools.banking.suggest_matches.SuggestMatchesTool",
+    "banking.reconcile_voucher": "erpnext_ai_bots.tools.banking.reconcile_voucher.ReconcileVoucherTool",
+    "banking.auto_reconcile": "erpnext_ai_bots.tools.banking.auto_reconcile.AutoReconcileTool",
 }
 
 
@@ -119,6 +125,19 @@ CATEGORY_TOOL_MAP: Dict[str, Set[str]] = {
         "accounting.create_payment_entry",
         "accounting.get_general_ledger",
         "purchase.get_purchase_invoices",
+        "banking.get_unreconciled_transactions",
+        "banking.suggest_matches",
+        "banking.reconcile_voucher",
+        "banking.auto_reconcile",
+    },
+    "Banking": {
+        "accounting.get_bank_balances",
+        "accounting.create_payment_entry",
+        "accounting.create_journal_entry",
+        "banking.get_unreconciled_transactions",
+        "banking.suggest_matches",
+        "banking.reconcile_voucher",
+        "banking.auto_reconcile",
     },
     "Sales": {
         "sales.get_pipeline",
@@ -195,6 +214,11 @@ CATEGORY_KEYWORDS: Dict[str, List[str]] = {
     "Projects": [
         "project", "task", "milestone", "timesheet", "issue",
         "ticket", "support", "asset",
+    ],
+    "Banking": [
+        "reconcile", "reconciliation", "bank statement", "unreconciled",
+        "clearance", "unallocated", "bank transaction", "bank feed",
+        "statement", "deposit", "withdrawal",
     ],
 }
 
