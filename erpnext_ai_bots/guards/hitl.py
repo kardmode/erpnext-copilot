@@ -297,3 +297,4 @@ def reject_action(action_id: str, user: str, reason: Optional[str] = None) -> Di
     )
 
     return {"status": "rejected", "action_id": action_id}
+

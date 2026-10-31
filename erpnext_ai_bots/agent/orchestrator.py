@@ -39,9 +39,20 @@ class Orchestrator:
 
     def _load_messages(self) -> list:
         session = frappe.get_doc("AI Chat Session", self.session_id)
+        self.session_category = getattr(session, "category", "General") or "General"
         if session.messages_json:
             return json.loads(session.messages_json)
         return []
+
+    def _get_latest_user_text(self) -> str:
+        for m in reversed(self.messages):
+            if m.get("role") == "user":
+                c = m.get("content")
+                if isinstance(c, str):
+                    return c
+                elif isinstance(c, list):
+                    return " ".join([b.get("text", "") for b in c if isinstance(b, dict)])
+        return """
 
     def _save_messages(self):
         frappe.db.set_value(
@@ -116,7 +127,10 @@ class Orchestrator:
         )
         # model=None lets CodexClient fall back to DEFAULT_CODEX_MODEL.
 
-        tool_schemas = self.tool_registry.get_openai_schemas()
+        tool_schemas = self.tool_registry.get_openai_schemas(
+            category=getattr(self, "session_category", "General"),
+            message_text=self._get_latest_user_text(),
+        )
         max_iterations = self.settings.max_tool_calls_per_turn or 15
 
         # The Codex Responses API keeps a flat input list across turns.
@@ -465,7 +479,10 @@ class Orchestrator:
                 model=self.settings.model_name or "claude-sonnet-4-20250514",
                 max_tokens=self.settings.max_tokens_per_request or 4096,
                 system=get_system_prompt(self.user, self.company),
-                tools=self.tool_registry.get_all_schemas(),
+                tools=self.tool_registry.get_all_schemas(
+                    category=getattr(self, "session_category", "General"),
+                    message_text=self._get_latest_user_text(),
+                ),
                 messages=api_messages,
             ) as stream:
                 response = self.stream_bridge.process_stream(stream)

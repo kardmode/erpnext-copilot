@@ -16,3 +16,4 @@ def has_permission(doc, ptype, user):
     if "System Manager" in frappe.get_roles(user):
         return True
     return False
+
