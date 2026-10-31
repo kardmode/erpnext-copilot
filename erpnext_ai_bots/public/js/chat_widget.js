@@ -138,6 +138,73 @@ function _renderChart(canvas, raw) {
 
 frappe.provide("erpnext_ai_bots");
 
+erpnext_ai_bots.highlight_code = function (code, lang) {
+    if (!code) return "";
+    lang = (lang || "").toLowerCase();
+
+    // SQL Highlighting
+    if (lang === "sql") {
+        return code.replace(
+            /\b(SELECT|FROM|WHERE|JOIN|LEFT|RIGHT|INNER|OUTER|ON|GROUP\s+BY|ORDER\s+BY|LIMIT|AND|OR|NOT|IN|IS|NULL|COUNT|SUM|AVG|MAX|MIN|AS|DISTINCT|HAVING|UNION|ALL|LIKE|BETWEEN|CASE|WHEN|THEN|ELSE|END)\b/gi,
+            function (m) { return '<span class="ai-hl-keyword">' + m + '</span>'; }
+        ).replace(
+            /(['"])(?:(?=(\\?))\2.)*?\1/g,
+            function (m) { return '<span class="ai-hl-string">' + m + '</span>'; }
+        );
+    }
+
+    // JSON Highlighting
+    if (lang === "json") {
+        return code.replace(
+            /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?/g,
+            function (match, p1, p2, isKey, isBool) {
+                if (isKey) return '<span class="ai-hl-keyword">' + match + '</span>';
+                if (/^"/.test(match)) return '<span class="ai-hl-string">' + match + '</span>';
+                if (isBool) return '<span class="ai-hl-keyword">' + match + '</span>';
+                return '<span class="ai-hl-number">' + match + '</span>';
+            }
+        );
+    }
+
+    // Python / JS keywords
+    if (lang === "python" || lang === "py" || lang === "js" || lang === "javascript") {
+        return code.replace(
+            /\b(def|class|return|if|elif|else|for|while|import|from|try|except|finally|with|as|None|True|False|async|await|const|let|var|function)\b/g,
+            function (m) { return '<span class="ai-hl-keyword">' + m + '</span>'; }
+        ).replace(
+            /(['"])(?:(?=(\\?))\2.)*?\1/g,
+            function (m) { return '<span class="ai-hl-string">' + m + '</span>'; }
+        );
+    }
+
+    return code;
+};
+
+erpnext_ai_bots.copy_table_csv = function (btn) {
+    const $wrapper = $(btn).closest(".ai-table-wrapper");
+    const $table = $wrapper.find("table");
+    if (!$table.length) return;
+
+    const rows = [];
+    $table.find("tr").each(function () {
+        const row = [];
+        $(this).find("th, td").each(function () {
+            let text = $(this).text().trim().replace(/"/g, '""');
+            row.push('"' + text + '"');
+        });
+        if (row.length) rows.push(row.join(","));
+    });
+
+    const csvContent = rows.join("\n");
+    navigator.clipboard.writeText(csvContent).then(function () {
+        const $b = $(btn);
+        $b.addClass("copied").html('<i class="octicon octicon-check"></i> Copied CSV');
+        setTimeout(() => {
+            $b.removeClass("copied").html('<i class="octicon octicon-clippy"></i> Copy CSV');
+        }, 2000);
+    });
+};
+
 // ── Markdown table post-processor ───────────────────────────────────────────
 // frappe.markdown() uses marked.js but may be configured without GFM tables.
 // We detect raw markdown table syntax surviving in the HTML output and convert
@@ -191,7 +258,7 @@ erpnext_ai_bots.render_markdown = function (text) {
                 })
                 .join("");
 
-            return `<table><thead><tr>${th_html}</tr></thead><tbody>${tr_html}</tbody></table>`;
+            return `<div class="ai-table-wrapper"><div class="ai-table-header"><span><i class="octicon octicon-table"></i> Data Table</span><button class="ai-table-copy-btn" onclick="erpnext_ai_bots.copy_table_csv(this)"><i class="octicon octicon-clippy"></i> Copy CSV</button></div><table><thead><tr>${th_html}</tr></thead><tbody>${tr_html}</tbody></table></div>`;
         }
     );
 
@@ -212,7 +279,8 @@ erpnext_ai_bots.render_markdown = function (text) {
                 + '})}">'
                 + 'Copy</button>'
                 + '</div>';
-            return '<pre>' + header + '<code id="' + uid + '">' + code + '</code></pre>';
+            var highlighted = erpnext_ai_bots.highlight_code(code, lang);
+            return '<pre>' + header + '<code id="' + uid + '" class="language-' + langLabel + '">' + highlighted + '</code></pre>';
         }
     );
 

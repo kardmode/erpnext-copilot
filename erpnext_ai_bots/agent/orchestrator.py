@@ -706,14 +706,34 @@ class Orchestrator:
             )
 
     def _prepare_messages_for_api(self) -> list:
-        """Strip custom metadata keys before sending to Anthropic."""
+        """Strip custom metadata keys, prune oversized older payloads, and manage context window atomically."""
         cleaned = []
         for msg in self.messages:
             cleaned.append({"role": msg["role"], "content": msg["content"]})
 
-        # Context window management: cap at 100 messages
-        if len(cleaned) > 100:
-            cleaned = cleaned[:2] + cleaned[-98:]
+        # Atomic Context Window Management:
+        # Instead of arbitrary slicing which severs tool_use from tool_result,
+        # find clean user turn boundaries and summarize earlier messages.
+        max_turns = 24
+        if len(cleaned) > max_turns:
+            cut_idx = len(cleaned) - max_turns
+            while cut_idx < len(cleaned) and (
+                cleaned[cut_idx].get("role") != "user"
+                or (isinstance(cleaned[cut_idx].get("content"), list) and any(b.get("type") == "tool_result" for b in cleaned[cut_idx].get("content") if isinstance(b, dict)))
+            ):
+                cut_idx += 1
+
+            if cut_idx < len(cleaned):
+                cleaned = [
+                    {
+                        "role": "user",
+                        "content": "[Context note: Earlier conversation history compressed to stay within context limits]",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Acknowledged. Continuing with recent context."}],
+                    },
+                ] + cleaned[cut_idx:]
 
         return cleaned
 

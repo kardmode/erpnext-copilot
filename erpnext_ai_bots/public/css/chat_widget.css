@@ -2166,3 +2166,78 @@
 .btn-action-reject:hover {
     background: rgba(239, 68, 68, 0.1) !important;
 }
+
+
+/* ── Table Container & Export Button ──────────────────────────────────── */
+.ai-table-wrapper {
+    margin: 14px 0;
+    border: 1px solid var(--ai-border-strong);
+    border-radius: var(--ai-radius);
+    overflow: hidden;
+    background: var(--ai-bg-deep);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.ai-table-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 12px;
+    background: var(--ai-bg-elevated);
+    border-bottom: 1px solid var(--ai-border);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ai-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.ai-table-header span {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.ai-table-copy-btn {
+    background: transparent;
+    border: 1px solid var(--ai-border);
+    color: var(--ai-text-dim);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 8px;
+    border-radius: var(--ai-radius-sm);
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.ai-table-copy-btn:hover {
+    color: var(--ai-text-bright);
+    background: var(--ai-bg-hover);
+    border-color: var(--ai-border-strong);
+}
+
+.ai-table-copy-btn.copied {
+    color: var(--ai-success) !important;
+    border-color: var(--ai-success) !important;
+}
+
+/* ── Code Syntax Highlighting Tokens ─────────────────────────────────── */
+.ai-hl-keyword {
+    color: var(--ai-accent);
+    font-weight: 600;
+}
+
+.ai-hl-string {
+    color: var(--ai-success);
+}
+
+.ai-hl-number {
+    color: var(--ai-warning);
+}
+
+.ai-hl-comment {
+    color: var(--ai-text-dim);
+    font-style: italic;
+}

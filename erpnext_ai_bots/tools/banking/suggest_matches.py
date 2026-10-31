@@ -93,3 +93,4 @@ class SuggestMatchesTool(BaseTool):
             "match_count": len(formatted_matches),
             "engine": source,
         }
+
